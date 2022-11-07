@@ -5,7 +5,9 @@ use stc_ts_ast_rnode::{RObjectLit, RPropOrSpread, RSpreadElement};
 use stc_ts_errors::{DebugExt, Error};
 use stc_ts_file_analyzer_macros::validator;
 use stc_ts_type_ops::{union_normalization::UnionNormalizer, Fix};
-use stc_ts_types::{Accessor, Key, MethodSignature, PropertySignature, Type, TypeElement, TypeLit, Union, UnionMetadata};
+use stc_ts_types::{
+    Accessor, Key, KeywordType, MethodSignature, PropertySignature, Type, TypeElement, TypeLit, TypeParam, Union, UnionMetadata,
+};
 use stc_utils::cache::Freeze;
 use swc_common::{Spanned, SyntaxContext, TypeEq};
 use swc_ecma_ast::TsKeywordTypeKind;
@@ -108,7 +110,7 @@ impl Analyzer<'_, '_> {
         match prop {
             RPropOrSpread::Spread(RSpreadElement { expr, .. }) => {
                 let prop_ty: Type = expr.validate_with_default(self)?.freezed();
-                self.append_type(to, prop_ty)
+                self.append_type(to, prop_ty, true)
             }
             RPropOrSpread::Prop(prop) => {
                 let p: TypeElement = prop.validate_with_args(self, object_type)?;
@@ -161,11 +163,7 @@ impl Analyzer<'_, '_> {
     /// `{ a: number } + ( {b: number} | { c: number } )` => `{ a: number, b:
     /// number } | { a: number, c: number }`
     #[cfg_attr(debug_assertions, tracing::instrument(skip_all))]
-    fn append_type(&mut self, to: Type, mut rhs: Type) -> VResult<Type> {
-        if to.is_any() || to.is_unknown() {
-            return Ok(to);
-        }
-
+    fn append_type(&mut self, to: Type, mut rhs: Type, spread: bool) -> VResult<Type> {
         match to.normalize() {
             Type::Function(..) => {
                 // objectSpead.ts says
@@ -174,7 +172,23 @@ impl Analyzer<'_, '_> {
                 // functions result in { }
                 return Ok(to);
             }
+            Type::Keyword(KeywordType {
+                kind: TsKeywordTypeKind::TsStringKeyword,
+                ..
+            })
+            | Type::Keyword(KeywordType {
+                kind: TsKeywordTypeKind::TsNumberKeyword,
+                ..
+            })
+            | Type::Keyword(KeywordType {
+                kind: TsKeywordTypeKind::TsSymbolKeyword,
+                ..
+            }) if spread => return Err(Error::InvalidSpreadType { span: rhs.span() }),
             _ => {}
+        }
+
+        if to.is_any() || to.is_unknown() {
+            return Ok(to);
         }
 
         if rhs.is_any() || rhs.is_unknown() {
@@ -195,13 +209,13 @@ impl Analyzer<'_, '_> {
         match rhs.normalize() {
             Type::Ref(..) => {
                 let rhs = self.expand_top_ref(rhs.span(), Cow::Owned(rhs), Default::default())?.into_owned();
-                return self.append_type(to, rhs);
+                return self.append_type(to, rhs, spread);
             }
 
             Type::Interface(..) | Type::Class(..) | Type::Intersection(..) | Type::Mapped(..) => {
                 // Append as a type literal.
                 if let Some(rhs) = self.convert_type_to_type_lit(rhs.span(), Cow::Borrowed(&rhs))? {
-                    return self.append_type(to, Type::TypeLit(rhs.into_owned()));
+                    return self.append_type(to, Type::TypeLit(rhs.into_owned()), spread);
                 }
             }
 
@@ -219,6 +233,13 @@ impl Analyzer<'_, '_> {
                 rhs = rhs.foldable();
 
                 match rhs {
+                    Type::Param(TypeParam { constraint, .. }) => {
+                        if let Some(constraint) = constraint {
+                            return self.append_type(to, *constraint, spread);
+                        } else {
+                            return Ok(to);
+                        }
+                    }
                     Type::TypeLit(rhs) => {
                         lit.members.extend(rhs.members);
                         return Ok(to);
@@ -229,7 +250,7 @@ impl Analyzer<'_, '_> {
                             types: rhs
                                 .types
                                 .into_iter()
-                                .map(|rhs| self.append_type(to.clone(), rhs))
+                                .map(|rhs| self.append_type(to.clone(), rhs, spread))
                                 .collect::<Result<_, _>>()?,
                             metadata: UnionMetadata {
                                 common: common_metadata,
@@ -248,7 +269,7 @@ impl Analyzer<'_, '_> {
                     types: to
                         .types
                         .into_iter()
-                        .map(|to| self.append_type(to, rhs.clone()))
+                        .map(|to| self.append_type(to, rhs.clone(), spread))
                         .collect::<Result<_, _>>()?,
                     metadata: to.metadata,
                 })
@@ -258,7 +279,7 @@ impl Analyzer<'_, '_> {
             _ => {}
         }
 
-        unimplemented!("append_type:\n{:?}\n{:?}", to, rhs)
+        unimplemented!("append_type:\n{:?}\n{:?}", to, rhs.normalize())
     }
 
     #[cfg_attr(debug_assertions, tracing::instrument(skip_all))]

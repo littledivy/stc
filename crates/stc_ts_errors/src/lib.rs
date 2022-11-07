@@ -741,6 +741,11 @@ pub enum Error {
         span: Span,
     },
 
+    /// TS2698
+    InvalidSpreadType {
+        span: Span,
+    },
+
     /// TS2322
     AccessibilityDiffers {
         span: Span,
@@ -1907,6 +1912,8 @@ impl Error {
             Error::ClassPropNotInitialized { .. } => 2564,
 
             Error::VarMayNotBeInitialized { .. } => 2454,
+
+            Error::InvalidSpreadType { .. } => 2698,
 
             Error::UnreachableCode { .. } => 7027,
 
